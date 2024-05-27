@@ -46,7 +46,7 @@ func main() {
 	b := &bytes.Buffer{}
 	session.Stdout = b
 
-	if err := session.Run("echo hello"); err != nil {
+	if err := session.Run("mca-dump"); err != nil {
 		panic(err)
 	}
 	fmt.Println(b.String())
