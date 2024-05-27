@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"log"
 	"net"
+	"net/http"
 	"os"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -23,28 +27,39 @@ type mcaDump struct {
 	} `json:"vap_table"`
 }
 
-func main() {
-	targetIP := os.Args[1]
-	targetFingerprint := os.Args[2]
-	password := os.Getenv("SSH_PASS")
+var wifiStationSignalDBM = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "wifi_station_signal_dbm",
+	Help: "The current WiFi signal strength, in decibel-milliwatts (dBm).",
+}, []string{"ifname", "mac"})
 
+type unifiCollector struct {
+	TargetIP          string
+	TargetFingerprint string
+	Password          string
+}
+
+func (u *unifiCollector) Collect(metrics chan<- prometheus.Metric) {
+	log.Println("collecting metrics")
+
+	// XXX lazily connect to target via SSH
+	// XXX refresh connection/session if it's lapsed
 	config := &ssh.ClientConfig{
 		User: "admin",
 		Auth: []ssh.AuthMethod{
-			ssh.Password(password),
+			ssh.Password(u.Password),
 		},
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			fingerprint := ssh.FingerprintLegacyMD5(key)
 			// XXX we don't need to do a constant-time comparison, right? And comparing the fingerprint
 			//     should suffice, yeah?
-			if fingerprint != targetFingerprint {
+			if fingerprint != u.TargetFingerprint {
 				return errors.New("fingerprint mismatch")
 			}
 			return nil
 		},
 	}
 
-	client, err := ssh.Dial("tcp", targetIP+":22", config)
+	client, err := ssh.Dial("tcp", u.TargetIP+":22", config)
 	if err != nil {
 		panic(err)
 	}
@@ -69,5 +84,37 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Printf("%#v\n", dump)
+	for _, vapTable := range dump.VAPTable {
+		for _, staTable := range vapTable.STATable {
+			m := wifiStationSignalDBM.WithLabelValues(vapTable.Name, staTable.MAC)
+			m.Set(float64(staTable.Signal))
+			metrics <- m
+		}
+	}
+}
+
+func (u *unifiCollector) Describe(metrics chan<- *prometheus.Desc) {
+	log.Println("describing metrics")
+
+	wifiStationSignalDBM.WithLabelValues("", "").Describe(metrics)
+}
+
+func main() {
+	targetIP := os.Args[1]
+	targetFingerprint := os.Args[2]
+	password := os.Getenv("SSH_PASS")
+
+	c := &unifiCollector{
+		TargetIP:          targetIP,
+		TargetFingerprint: targetFingerprint,
+		Password:          password,
+	}
+
+	prometheus.DefaultRegisterer.MustRegister(c)
+
+	log.Println("listening on 127.0.0.1:9001")
+	err := http.ListenAndServe("127.0.0.1:9001", promhttp.Handler())
+	if err != nil {
+		panic(err)
+	}
 }
