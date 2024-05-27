@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -9,6 +10,18 @@ import (
 
 	"golang.org/x/crypto/ssh"
 )
+
+type mcaDump struct {
+	Version  string `json:"version"`
+	VAPTable []struct {
+		Name     string `json:"name"`
+		STATable []struct {
+			IP     string `json:"ip"`
+			MAC    string `json:"mac"`
+			Signal int    `json:"signal"`
+		} `json:"sta_table"`
+	} `json:"vap_table"`
+}
 
 func main() {
 	targetIP := os.Args[1]
@@ -49,5 +62,12 @@ func main() {
 	if err := session.Run("mca-dump"); err != nil {
 		panic(err)
 	}
-	fmt.Println(b.String())
+
+	dump := mcaDump{}
+	err = json.Unmarshal(b.Bytes(), &dump)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("%#v\n", dump)
 }
