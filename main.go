@@ -36,36 +36,42 @@ type unifiCollector struct {
 	TargetIP          string
 	TargetFingerprint string
 	Password          string
+
+	client *ssh.Client
 }
 
 func (u *unifiCollector) Collect(metrics chan<- prometheus.Metric) {
 	log.Println("collecting metrics")
 
-	// XXX lazily connect to target via SSH
 	// XXX refresh connection/session if it's lapsed
-	config := &ssh.ClientConfig{
-		User: "admin",
-		Auth: []ssh.AuthMethod{
-			ssh.Password(u.Password),
-		},
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			fingerprint := ssh.FingerprintLegacyMD5(key)
-			// XXX we don't need to do a constant-time comparison, right? And comparing the fingerprint
-			//     should suffice, yeah?
-			if fingerprint != u.TargetFingerprint {
-				return errors.New("fingerprint mismatch")
-			}
-			return nil
-		},
+
+	if u.client == nil {
+		log.Println("establishing new connection to target")
+
+		config := &ssh.ClientConfig{
+			User: "admin",
+			Auth: []ssh.AuthMethod{
+				ssh.Password(u.Password),
+			},
+			HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+				fingerprint := ssh.FingerprintLegacyMD5(key)
+				// XXX we don't need to do a constant-time comparison, right? And comparing the fingerprint
+				//     should suffice, yeah?
+				if fingerprint != u.TargetFingerprint {
+					return errors.New("fingerprint mismatch")
+				}
+				return nil
+			},
+		}
+
+		client, err := ssh.Dial("tcp", u.TargetIP+":22", config)
+		if err != nil {
+			panic(err)
+		}
+		u.client = client
 	}
 
-	client, err := ssh.Dial("tcp", u.TargetIP+":22", config)
-	if err != nil {
-		panic(err)
-	}
-	defer client.Close()
-
-	session, err := client.NewSession()
+	session, err := u.client.NewSession()
 	if err != nil {
 		panic(err)
 	}
