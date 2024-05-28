@@ -131,8 +131,10 @@ func main() {
 
 	prometheus.DefaultRegisterer.MustRegister(c)
 
-	log.Println("listening on 127.0.0.1:9001")
-	err := http.ListenAndServe("127.0.0.1:9001", promhttp.Handler())
+	addr := "0.0.0.0:9001"
+
+	log.Printf("listening on %v", addr)
+	err := http.ListenAndServe(addr, promhttp.Handler())
 	if err != nil {
 		log.Fatalf("error listening for connections: %v", err)
 	}
