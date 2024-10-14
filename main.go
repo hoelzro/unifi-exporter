@@ -32,6 +32,11 @@ var wifiStationSignalDBM = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Help: "The current WiFi signal strength, in decibel-milliwatts (dBm).",
 }, []string{"ifname", "mac"})
 
+var unifiOSInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "unifi_os_info",
+	Help: "Information on the Unifi OS running on the target.",
+}, []string{"version"})
+
 type unifiCollector struct {
 	TargetIP          string
 	TargetFingerprint string
@@ -103,6 +108,12 @@ func (u *unifiCollector) Collect(metrics chan<- prometheus.Metric) {
 		return
 	}
 
+	{
+		m := unifiOSInfo.WithLabelValues(dump.Version)
+		m.Set(1)
+		metrics <- m
+	}
+
 	for _, vapTable := range dump.VAPTable {
 		for _, staTable := range vapTable.STATable {
 			m := wifiStationSignalDBM.WithLabelValues(vapTable.Name, staTable.MAC)
@@ -116,6 +127,7 @@ func (u *unifiCollector) Describe(metrics chan<- *prometheus.Desc) {
 	log.Println("describing metrics")
 
 	wifiStationSignalDBM.WithLabelValues("", "").Describe(metrics)
+	unifiOSInfo.WithLabelValues("").Describe(metrics)
 }
 
 func main() {
