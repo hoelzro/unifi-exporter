@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -45,9 +46,7 @@ type unifiCollector struct {
 	client *ssh.Client
 }
 
-func (u *unifiCollector) Collect(metrics chan<- prometheus.Metric) {
-	log.Println("collecting metrics")
-
+func (u *unifiCollector) getDump() (*mcaDump, error) {
 	if u.client == nil {
 		log.Println("establishing new connection to target")
 
@@ -69,23 +68,19 @@ func (u *unifiCollector) Collect(metrics chan<- prometheus.Metric) {
 
 		client, err := ssh.Dial("tcp", u.TargetIP+":22", config)
 		if err != nil {
-			log.Printf("got error of type %[1]T when establishing SSH connection: %[1]v", err)
-			metrics <- prometheus.NewInvalidMetric(prometheus.NewInvalidDesc(err), err)
-			return
+			return nil, fmt.Errorf("establishing SSH connection: %w", err)
 		}
 		u.client = client
 	}
 
 	session, err := u.client.NewSession()
 	if err != nil {
-		log.Printf("got error of type %[1]T when creating a session: %[1]v", err)
-		metrics <- prometheus.NewInvalidMetric(prometheus.NewInvalidDesc(err), err)
-		err := u.client.Close()
-		if err != nil {
-			log.Printf("got error of type %[1]T when closing SSH connection during cleanup: %[1]v", err)
-		}
+		closeErr := u.client.Close()
 		u.client = nil
-		return
+		return nil, fmt.Errorf("creating a session: %w", errors.Join(
+			err,
+			closeErr,
+		))
 	}
 	defer session.Close()
 
@@ -93,18 +88,25 @@ func (u *unifiCollector) Collect(metrics chan<- prometheus.Metric) {
 	session.Stdout = b
 
 	if err := session.Run("mca-dump"); err != nil {
-		log.Printf("got error of type %[1]T when running remote command: %[1]v", err)
-		metrics <- prometheus.NewInvalidMetric(prometheus.NewInvalidDesc(err), err)
-
-		return
+		return nil, fmt.Errorf("running remote command: %w", err)
 	}
 
 	dump := mcaDump{}
 	err = json.Unmarshal(b.Bytes(), &dump)
 	if err != nil {
-		log.Printf("got error of type %[1]T when deserializing remote command output: %[1]v", err)
-		metrics <- prometheus.NewInvalidMetric(prometheus.NewInvalidDesc(err), err)
+		return nil, fmt.Errorf("deserializing remote command output: %w", err)
+	}
 
+	return &dump, nil
+}
+
+func (u *unifiCollector) Collect(metrics chan<- prometheus.Metric) {
+	log.Println("collecting metrics")
+
+	dump, err := u.getDump()
+	if err != nil {
+		log.Printf("got error of type %[1]T: %[1]v", err)
+		metrics <- prometheus.NewInvalidMetric(prometheus.NewInvalidDesc(err), err)
 		return
 	}
 
