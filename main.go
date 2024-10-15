@@ -38,6 +38,11 @@ var unifiOSInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Help: "Information on the Unifi OS running on the target.",
 }, []string{"version"})
 
+var probeSuccessMetric = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "probe_success",
+	Help: "Whether or not we were able to successfully probe the target.",
+})
+
 type unifiCollector struct {
 	TargetIP          string
 	TargetFingerprint string
@@ -106,9 +111,13 @@ func (u *unifiCollector) Collect(metrics chan<- prometheus.Metric) {
 	dump, err := u.getDump()
 	if err != nil {
 		log.Printf("got error of type %[1]T: %[1]v", err)
-		metrics <- prometheus.NewInvalidMetric(prometheus.NewInvalidDesc(err), err)
+		probeSuccessMetric.Set(0)
+		metrics <- probeSuccessMetric
 		return
 	}
+
+	probeSuccessMetric.Set(1)
+	metrics <- probeSuccessMetric
 
 	{
 		m := unifiOSInfo.WithLabelValues(dump.Version)
@@ -130,6 +139,7 @@ func (u *unifiCollector) Describe(metrics chan<- *prometheus.Desc) {
 
 	wifiStationSignalDBM.WithLabelValues("", "").Describe(metrics)
 	unifiOSInfo.WithLabelValues("").Describe(metrics)
+	probeSuccessMetric.Describe(metrics)
 }
 
 func main() {
