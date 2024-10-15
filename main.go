@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -49,9 +50,13 @@ type unifiCollector struct {
 	Password          string
 
 	client *ssh.Client
+	lock   sync.Mutex
 }
 
 func (u *unifiCollector) getDump() (*mcaDump, error) {
+	u.lock.Lock()
+	defer u.lock.Unlock()
+
 	if u.client == nil {
 		log.Println("establishing new connection to target")
 
