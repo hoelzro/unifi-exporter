@@ -2,19 +2,27 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"golang.org/x/crypto/ssh"
+)
+
+const (
+	dumpTimeout  = 5 * time.Second
+	panicTimeout = time.Minute
 )
 
 type mcaDump struct {
@@ -53,9 +61,63 @@ type unifiCollector struct {
 	lock   sync.Mutex
 }
 
-func (u *unifiCollector) getDump() (*mcaDump, error) {
+func (u *unifiCollector) getDump(ctx context.Context) (*mcaDump, error) {
 	u.lock.Lock()
 	defer u.lock.Unlock()
+
+	// x/crypto/ssh doesn't really support the use of contexts (and my experiments with
+	// the Timeout client option don't seem to do anything), so we'll use a "watcher" goroutine
+	// that closes the connection upon context close to try to signal the goroutine that's connecting
+	// and establishing the session to exit, and panics after a much longer timeout in case that doesn't
+	// work.  We need…
+
+	// …a channel to signal the "watcher" goroutine that we're exiting
+	finished := make(chan struct{})
+	defer (func() {
+		finished <- struct{}{}
+		close(finished)
+	})()
+
+	// …a timer to tell the watcher to panic - since a crashed program would be better than one that's
+	// indefinitely hung
+	panicTimer := time.NewTimer(panicTimeout)
+	defer panicTimer.Stop()
+
+	// …a reference to the underlying connection for the "watcher" to close.
+	//
+	// I don't like that this is an io.Closer - I did that because it could be a net.Conn or an ssh.Conn,
+	// which feels gross because the behavior could differ slightly, but this is more or less the best
+	// we can do!
+	var closer io.Closer
+	if u.client != nil {
+		closer = u.client.Conn
+	}
+
+	// …a reference to the context's "done" channel, which we need in a variable so we can set it to
+	// nil when the context is done so we don't get repeated events from it
+	doneChan := ctx.Done()
+
+	go (func() {
+		for {
+			select {
+			case <-doneChan:
+				// our context is done, so try to effect a timeout
+				doneChan = nil // set this to nil so that we don't run this case statement again
+				if closer != nil {
+					err := closer.Close()
+					if err != nil {
+						log.Printf("got error when closing connection upon timeout: %v", err)
+					}
+				}
+			case <-finished:
+				// everything is ok, so stop looping
+				return
+			case <-panicTimer.C:
+				// too much time has passed - we're probably going to hang forever, so crash
+				panic("unable to return error upon timeout - failing hard")
+			}
+		}
+	})()
 
 	if u.client == nil {
 		log.Println("establishing new connection to target")
@@ -76,11 +138,23 @@ func (u *unifiCollector) getDump() (*mcaDump, error) {
 			},
 		}
 
-		client, err := ssh.Dial("tcp", u.TargetIP+":22", config)
+		var dialer net.Dialer
+
+		var err error
+		connection, err := dialer.DialContext(ctx, "tcp", u.TargetIP+":22")
 		if err != nil {
-			return nil, fmt.Errorf("establishing SSH connection: %w", err)
+			return nil, fmt.Errorf("establishing SSH connection (dial): %w", err)
 		}
+		closer = connection
+
+		conn, chans, reqs, err := ssh.NewClientConn(connection, u.TargetIP+":22", config)
+		if err != nil {
+			return nil, fmt.Errorf("establishing SSH connection (new client conn): %w", err)
+		}
+
+		client := ssh.NewClient(conn, chans, reqs)
 		u.client = client
+		closer = client.Conn
 	}
 
 	session, err := u.client.NewSession()
@@ -111,9 +185,12 @@ func (u *unifiCollector) getDump() (*mcaDump, error) {
 }
 
 func (u *unifiCollector) Collect(metrics chan<- prometheus.Metric) {
+	ctx, cancel := context.WithTimeout(context.TODO(), dumpTimeout)
+	defer cancel()
+
 	log.Println("collecting metrics")
 
-	dump, err := u.getDump()
+	dump, err := u.getDump(ctx)
 	if err != nil {
 		log.Printf("got error of type %[1]T: %[1]v", err)
 		probeSuccessMetric.Set(0)
