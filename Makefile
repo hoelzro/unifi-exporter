@@ -1,0 +1,2 @@
+build:
+	ko build -B .
